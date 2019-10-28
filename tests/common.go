@@ -72,26 +72,6 @@ type SlicesStruct struct {
 	EmptySl   []EmptyStruct
 }
 
-type SliceSlicesStruct struct {
-	Int8SlSl    [][]int8
-	Int16SlSl   [][]int16
-	Int32SlSl   [][]int32
-	Int64SlSl   [][]int64
-	VarintSlSl  [][]int64 `binary:"varint"`
-	IntSlSl     [][]int
-	ByteSlSl    [][]byte
-	Uint8SlSl   [][]uint8
-	Uint16SlSl  [][]uint16
-	Uint32SlSl  [][]uint32
-	Uint64SlSl  [][]uint64
-	UvarintSlSl [][]uint64 `binary:"varint"`
-	UintSlSl    [][]uint
-	StringSlSl  [][]string
-	BytesSlSl   [][][]byte
-	TimeSlSl    [][]time.Time
-	EmptySlSl   [][]EmptyStruct
-}
-
 type PointersStruct struct {
 	Int8Pt    *int8
 	Int16Pt   *int16
@@ -195,7 +175,6 @@ var StructTypes = []interface{}{
 	(*ShortArraysStruct)(nil),
 	(*ArraysStruct)(nil),
 	(*SlicesStruct)(nil),
-	(*SliceSlicesStruct)(nil),
 	(*PointersStruct)(nil),
 	(*PointerSlicesStruct)(nil),
 	(*NestedPointersStruct)(nil),
@@ -210,19 +189,35 @@ var StructTypes = []interface{}{
 //----------------------------------------
 // Type definition types
 
+// This will be encoded as
+// message SomeName { int64 val = 1; }
 type IntDef int
 
+// This will be encoded as
+// message SomeName { repeated int val = 1; }
 type IntAr [4]int
 
+// This will be encoded as
+// message SomeName { repeated int val = 1; }
 type IntSl []int
 
+// This will be encoded as
+// message SomeName { bytes val = 1; }
 type ByteAr [4]byte
 
+// This will be encoded as
+// message SomeName { bytes val = 1; }
 type ByteSl []byte
 
+type PrimitivesStructDef PrimitivesStruct
+
+// This will be encoded as
+// message SomeName { repeated PrimitivesStruct val = 1; }
 type PrimitivesStructSl []PrimitivesStruct
 
-type PrimitivesStructDef PrimitivesStruct
+// This will be encoded as
+// message SomeName { repeated PrimitivesStruct val = 1; }
+type PrimitivesStructAr [2]PrimitivesStruct
 
 var DefTypes = []interface{}{
 	(*IntDef)(nil),
@@ -247,21 +242,31 @@ type Interface2 interface {
 
 type Concrete1 struct{}
 
-func (_ Concrete1) AssertInterface1() {}
-func (_ Concrete1) AssertInterface2() {}
+func (Concrete1) AssertInterface1() {}
+func (Concrete1) AssertInterface2() {}
 
 type Concrete2 struct{}
 
-func (_ Concrete2) AssertInterface1() {}
-func (_ Concrete2) AssertInterface2() {}
+func (Concrete2) AssertInterface1() {}
+func (Concrete2) AssertInterface2() {}
 
-type Concrete3 [4]byte
+// Special case: this concrete implementation (of Interface1) is a type alias.
+type ConcreteTypeDef [4]byte
 
-func (_ Concrete3) AssertInterface1() {}
+func (ConcreteTypeDef) AssertInterface1() {}
 
+// Ideally, user's of amino should refrain from using the above
+// but wrap actual values in structs; e.g. like:
+type ConcreteWrappedBytes struct {
+	Value []byte
+}
+
+func (ConcreteWrappedBytes) AssertInterface1() {}
+
+// Yet another special case: Field could be a type alias (should not be wrapped).
 type InterfaceFieldsStruct struct {
 	F1 Interface1
 	F2 Interface1
 }
 
-func (_ *InterfaceFieldsStruct) AssertInterface1() {}
+func (*InterfaceFieldsStruct) AssertInterface1() {}

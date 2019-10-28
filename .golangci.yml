@@ -1,0 +1,14 @@
+run:
+  deadline: 1m
+
+linters:
+  enable-all: true
+  disable:
+    - gocyclo
+    - maligned
+    - dupl
+    - ineffassign
+    - unparam
+    - nakedret
+    - gochecknoglobals
+    - gochecknoinits

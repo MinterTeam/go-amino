@@ -3,11 +3,12 @@ package amino_test
 import (
 	"fmt"
 	"testing"
-
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tendermint/go-amino"
+	"github.com/stretchr/testify/require"
+
+	amino "github.com/tendermint/go-amino"
 )
 
 func TestNilSliceEmptySlice(t *testing.T) {
@@ -119,14 +120,17 @@ func TestWriteEmpty(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, b, []byte(nil), "empty struct should be encoded as empty bytes")
 	var inner Inner
-	cdc.UnmarshalBinaryBare(b, &inner)
+	err = cdc.UnmarshalBinaryBare(b, &inner)
+	require.NoError(t, err)
 	assert.Equal(t, Inner{}, inner, "")
 
 	b, err = cdc.MarshalBinaryBare(SomeStruct{})
 	assert.NoError(t, err)
 	assert.Equal(t, b, []byte(nil), "empty structs should be encoded as empty bytes")
 	var outer SomeStruct
-	cdc.UnmarshalBinaryBare(b, &outer)
+	err = cdc.UnmarshalBinaryBare(b, &outer)
+	require.NoError(t, err)
+
 	assert.Equal(t, SomeStruct{}, outer, "")
 }
 
@@ -145,13 +149,11 @@ func TestForceWriteEmpty(t *testing.T) {
 
 	b, err := cdc.MarshalBinaryBare(OuterWriteEmpty{})
 	assert.NoError(t, err)
-	assert.NotZero(t, len(b), "amino:\"write_empty\" did not work")
+	assert.Equal(t, []byte{10, 5, 13, 0, 0, 0, 0, 16, 0}, b)
 
 	b, err = cdc.MarshalBinaryBare(InnerWriteEmpty{})
 	assert.NoError(t, err)
-	t.Log(b)
-	// TODO(ismail): this alone won't be encoded:
-	//assert.NotZero(t, len(b), "amino:\"write_empty\" did not work")
+	assert.Equal(t, []byte{13, 0, 0, 0, 0}, b)
 }
 
 func TestStructSlice(t *testing.T) {
@@ -160,9 +162,11 @@ func TestStructSlice(t *testing.T) {
 		B int
 	}
 
-	type Foos []Foo
+	type Foos struct {
+		Fs []Foo
+	}
 
-	f := Foos{Foo{100, 101}, Foo{102, 103}}
+	f := Foos{Fs: []Foo{{100, 101}, {102, 103}}}
 
 	cdc := amino.NewCodec()
 
@@ -171,7 +175,8 @@ func TestStructSlice(t *testing.T) {
 	assert.Equal(t, "0A04086410650A0408661067", fmt.Sprintf("%X", bz))
 	t.Log(bz)
 	var f2 Foos
-	cdc.UnmarshalBinaryBare(bz, &f2)
+	err = cdc.UnmarshalBinaryBare(bz, &f2)
+	require.NoError(t, err)
 	assert.Equal(t, f, f2)
 }
 
@@ -204,7 +209,7 @@ func TestStructPointerSlice1(t *testing.T) {
 	var f3 = Foo{
 		A: "k",
 		B: 2,
-		C: []*Foo{&Foo{}, &Foo{}, &Foo{}},
+		C: []*Foo{{}, {}, {}},
 		D: "j",
 	}
 	bz2, err := cdc.MarshalBinaryLengthPrefixed(f3)
@@ -229,11 +234,11 @@ func TestStructPointerSlice2(t *testing.T) {
 		C: []*Foo{nil, nil, nil},
 		D: "j",
 	}
-	bz, err := cdc.MarshalBinaryLengthPrefixed(f)
+	_, err := cdc.MarshalBinaryLengthPrefixed(f)
 	assert.Error(t, err, "nil elements of a slice/array not supported when empty_elements field tag set.")
 
-	f.C = []*Foo{&Foo{}, &Foo{}, &Foo{}}
-	bz, err = cdc.MarshalBinaryLengthPrefixed(f)
+	f.C = []*Foo{{}, {}, {}}
+	bz, err := cdc.MarshalBinaryLengthPrefixed(f)
 	assert.NoError(t, err)
 
 	var f2 Foo
@@ -242,4 +247,69 @@ func TestStructPointerSlice2(t *testing.T) {
 
 	assert.Equal(t, f, f2)
 	assert.NotNil(t, f2.C[0])
+}
+
+func TestBasicTypes(t *testing.T) {
+	// we explicitly disallow type definitions like the following:
+	type byteAlias []byte
+
+	cdc := amino.NewCodec()
+	ba := byteAlias([]byte("this should work because it gets wrapped by a struct"))
+	bz, err := cdc.MarshalBinaryLengthPrefixed(ba)
+	assert.NotZero(t, bz)
+	require.NoError(t, err)
+
+	res := &byteAlias{}
+	err = cdc.UnmarshalBinaryLengthPrefixed(bz, res)
+
+	require.NoError(t, err)
+	assert.Equal(t, ba, *res)
+}
+
+func TestUnmarshalMapBinary(t *testing.T) {
+	obj := new(map[string]int)
+	cdc := amino.NewCodec()
+
+	// Binary doesn't support decoding to a map...
+	binBytes := []byte(`dontcare`)
+	assert.Panics(t, func() {
+		err := cdc.UnmarshalBinaryBare(binBytes, &obj)
+		assert.Fail(t, "should have paniced but got err: %v", err)
+	})
+
+	assert.Panics(t, func() {
+		err := cdc.UnmarshalBinaryBare(binBytes, obj)
+		require.Error(t, err)
+	})
+
+	// ... nor encoding it.
+	assert.Panics(t, func() {
+		bz, err := cdc.MarshalBinaryBare(obj)
+		assert.Fail(t, "should have paniced but got bz: %X err: %v", bz, err)
+	})
+}
+
+func TestUnmarshalFuncBinary(t *testing.T) {
+	obj := func() {}
+	cdc := amino.NewCodec()
+	// Binary doesn't support decoding to a func...
+	binBytes := []byte(`dontcare`)
+	err := cdc.UnmarshalBinaryLengthPrefixed(binBytes, &obj)
+	// on length prefixed we return an error:
+	assert.Error(t, err)
+
+	assert.Panics(t, func() {
+		err = cdc.UnmarshalBinaryBare(binBytes, &obj)
+		require.Error(t, err)
+	})
+
+	err = cdc.UnmarshalBinaryBare(binBytes, obj)
+	require.Error(t, err)
+	require.Equal(t, err, amino.ErrNoPointer)
+
+	// ... nor encoding it.
+	assert.Panics(t, func() {
+		bz, err := cdc.MarshalBinaryLengthPrefixed(obj)
+		assert.Fail(t, "should have paniced but got bz: %X err: %v", bz, err)
+	})
 }

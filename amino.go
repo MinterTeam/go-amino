@@ -2,21 +2,27 @@ package amino
 
 import (
 	"bytes"
-	"encoding/binary"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"time"
+
+	"encoding/binary"
+	"encoding/json"
+
+	"github.com/pkg/errors"
 )
 
-//----------------------------------------
-// Global methods for global sealed codec.
-var gcdc *Codec
+var (
+	// Global methods for global sealed codec.
+	gcdc *Codec
 
-// we use this time to init. a zero value (opposed to reflect.Zero which gives time.Time{} / 01-01-01 00:00:00)
-var zeroTime time.Time
+	// we use this time to init. a zero value (opposed to reflect.Zero which gives time.Time{} / 01-01-01 00:00:00)
+	zeroTime time.Time
+
+	// ErrNoPointer is thrown when you call a method that expects a pointer, e.g. Unmarshal
+	ErrNoPointer = errors.New("expected a pointer")
+)
 
 const (
 	unixEpochStr = "1970-01-01 00:00:00 +0000 UTC"
@@ -91,9 +97,9 @@ type Typ3 uint8
 
 const (
 	// Typ3 types
-	Typ3_Varint     = Typ3(0)
-	Typ3_8Byte      = Typ3(1)
-	Typ3_ByteLength = Typ3(2)
+	Typ3Varint     = Typ3(0)
+	Typ38Byte      = Typ3(1)
+	Typ3ByteLength = Typ3(2)
 	//Typ3_Struct     = Typ3(3)
 	//Typ3_StructTerm = Typ3(4)
 	Typ3_4Byte = Typ3(5)
@@ -103,11 +109,11 @@ const (
 
 func (typ Typ3) String() string {
 	switch typ {
-	case Typ3_Varint:
+	case Typ3Varint:
 		return "(U)Varint"
-	case Typ3_8Byte:
+	case Typ38Byte:
 		return "8Byte"
-	case Typ3_ByteLength:
+	case Typ3ByteLength:
 		return "ByteLength"
 	//case Typ3_Struct:
 	//	return "Struct"
@@ -199,24 +205,46 @@ func (cdc *Codec) MarshalBinaryBare(o interface{}) ([]byte, error) {
 	var bz []byte
 	buf := new(bytes.Buffer)
 	rt := rv.Type()
-	info, err := cdc.getTypeInfo_wlock(rt)
+	info, err := cdc.getTypeInfoWlock(rt)
 	if err != nil {
 		return nil, err
 	}
-	err = cdc.encodeReflectBinary(buf, info, rv, FieldOptions{BinFieldNum: 1}, true)
-	if err != nil {
-		return nil, err
+	// in the case of of a repeated struct (e.g. type Alias []SomeStruct),
+	// we do not need to prepend with `(field_number << 3) | wire_type` as this
+	// would need to be done for each struct and not only for the first.
+	if rv.Kind() != reflect.Struct && !isStructOrRepeatedStruct(info) {
+		writeEmpty := false
+		typ3 := typeToTyp3(info.Type, FieldOptions{})
+		bare := typ3 != Typ3ByteLength
+		if err := cdc.writeFieldIfNotEmpty(buf, 1, info, FieldOptions{}, FieldOptions{}, rv, writeEmpty, bare); err != nil {
+			return nil, err
+		}
+		bz = buf.Bytes()
+	} else {
+		err = cdc.encodeReflectBinary(buf, info, rv, FieldOptions{BinFieldNum: 1}, true)
+		if err != nil {
+			return nil, err
+		}
+		bz = buf.Bytes()
 	}
-	bz = buf.Bytes()
-
 	// If registered concrete, prepend prefix bytes.
 	if info.Registered {
+		// TODO: https://github.com/tendermint/go-amino/issues/267
+		//return MarshalBinaryBare(RegisteredAny{
+		//	AminoPreOrDisfix: info.Prefix.Bytes(),
+		//	Value: bz,
+		//})
 		pb := info.Prefix.Bytes()
 		bz = append(pb, bz...)
 	}
 
 	return bz, nil
 }
+
+//type RegisteredAny struct {
+//	AminoPreOrDisfix []byte
+//	Value []byte
+//}
 
 // Panics if error.
 func (cdc *Codec) MustMarshalBinaryBare(o interface{}) []byte {
@@ -238,13 +266,13 @@ func (cdc *Codec) UnmarshalBinaryLengthPrefixed(bz []byte, ptr interface{}) erro
 	// Read byte-length prefix.
 	u64, n := binary.Uvarint(bz)
 	if n < 0 {
-		return fmt.Errorf("Error reading msg byte-length prefix: got code %v", n)
+		return errors.Errorf("Error reading msg byte-length prefix: got code %v", n)
 	}
 	if u64 > uint64(len(bz)-n) {
-		return fmt.Errorf("Not enough bytes to read in UnmarshalBinaryLengthPrefixed, want %v more bytes but only have %v",
+		return errors.Errorf("Not enough bytes to read in UnmarshalBinaryLengthPrefixed, want %v more bytes but only have %v",
 			u64, len(bz)-n)
 	} else if u64 < uint64(len(bz)-n) {
-		return fmt.Errorf("Bytes left over in UnmarshalBinaryLengthPrefixed, should read %v more bytes but have %v",
+		return errors.Errorf("Bytes left over in UnmarshalBinaryLengthPrefixed, should read %v more bytes but have %v",
 			u64, len(bz)-n)
 	}
 	bz = bz[n:]
@@ -256,7 +284,8 @@ func (cdc *Codec) UnmarshalBinaryLengthPrefixed(bz []byte, ptr interface{}) erro
 // Like UnmarshalBinaryBare, but will first read the byte-length prefix.
 // UnmarshalBinaryLengthPrefixedReader will panic if ptr is a nil-pointer.
 // If maxSize is 0, there is no limit (not recommended).
-func (cdc *Codec) UnmarshalBinaryLengthPrefixedReader(r io.Reader, ptr interface{}, maxSize int64) (n int64, err error) {
+func (cdc *Codec) UnmarshalBinaryLengthPrefixedReader(r io.Reader, ptr interface{},
+	maxSize int64) (n int64, err error) {
 	if maxSize < 0 {
 		panic("maxSize cannot be negative.")
 	}
@@ -269,12 +298,15 @@ func (cdc *Codec) UnmarshalBinaryLengthPrefixedReader(r io.Reader, ptr interface
 		if err != nil {
 			return
 		}
-		n += 1
+		n++
 		if buf[i]&0x80 == 0 {
 			break
 		}
 		if n >= maxSize {
-			err = fmt.Errorf("Read overflow, maxSize is %v but uvarint(length-prefix) is itself greater than maxSize.", maxSize)
+			err = errors.Errorf(
+				"read overflow, maxSize is %v but uvarint(length-prefix) is itself greater than maxSize",
+				maxSize,
+			)
 		}
 	}
 	u64, _ := binary.Uvarint(buf[:])
@@ -283,21 +315,26 @@ func (cdc *Codec) UnmarshalBinaryLengthPrefixedReader(r io.Reader, ptr interface
 	}
 	if maxSize > 0 {
 		if uint64(maxSize) < u64 {
-			err = fmt.Errorf("Read overflow, maxSize is %v but this amino binary object is %v bytes.", maxSize, u64)
+			err = errors.Errorf("read overflow, maxSize is %v but this amino binary object is %v bytes", maxSize, u64)
 			return
 		}
 		if (maxSize - n) < int64(u64) {
-			err = fmt.Errorf("Read overflow, maxSize is %v but this length-prefixed amino binary object is %v+%v bytes.", maxSize, n, u64)
+			err = errors.Errorf(
+				"read overflow, maxSize is %v but this length-prefixed amino binary object is %v+%v bytes",
+				maxSize, n, u64,
+			)
 			return
 		}
 	}
 	l = int64(u64)
 	if l < 0 {
-		err = fmt.Errorf("Read overflow, this implementation can't read this because, why would anyone have this much data? Hello from 2018.")
+		_ = errors.Errorf(
+			"read overflow, this implementation can't read this because, why would anyone have this much data? Hello from 2018",
+		)
 	}
 
 	// Read that many bytes.
-	var bz = make([]byte, l, l)
+	var bz = make([]byte, l)
 	_, err = io.ReadFull(r, bz)
 	if err != nil {
 		return
@@ -322,33 +359,121 @@ func (cdc *Codec) UnmarshalBinaryBare(bz []byte, ptr interface{}) error {
 
 	rv := reflect.ValueOf(ptr)
 	if rv.Kind() != reflect.Ptr {
-		panic("Unmarshal expects a pointer")
+		return ErrNoPointer
 	}
 	rv = rv.Elem()
 	rt := rv.Type()
-	info, err := cdc.getTypeInfo_wlock(rt)
+	info, err := cdc.getTypeInfoWlock(rt)
 	if err != nil {
 		return err
 	}
+
 	// If registered concrete, consume and verify prefix bytes.
 	if info.Registered {
+		// TODO: https://github.com/tendermint/go-amino/issues/267
 		pb := info.Prefix.Bytes()
 		if len(bz) < 4 {
-			return fmt.Errorf("UnmarshalBinaryBare expected to read prefix bytes %X (since it is registered concrete) but got %X", pb, bz)
+			return fmt.Errorf(
+				"unmarshalBinaryBare expected to read prefix bytes %X (since it is registered concrete) but got %X",
+				pb, bz,
+			)
 		} else if !bytes.Equal(bz[:4], pb) {
-			return fmt.Errorf("UnmarshalBinaryBare expected to read prefix bytes %X (since it is registered concrete) but got %X...", pb, bz[:4])
+			return fmt.Errorf(
+				"unmarshalBinaryBare expected to read prefix bytes %X (since it is registered concrete) but got %X",
+				pb, bz[:4],
+			)
 		}
 		bz = bz[4:]
 	}
+	// Only add length prefix if we have another typ3 then Typ3ByteLength.
+	// Default is non-length prefixed:
+	bare := true
+	var nWrap int
+	isKnownType := (info.Type.Kind() != reflect.Map) && (info.Type.Kind() != reflect.Func)
+	if !isStructOrRepeatedStruct(info) &&
+		!isPointerToStructOrToRepeatedStruct(rv, rt) &&
+		len(bz) > 0 &&
+		(rv.Kind() != reflect.Interface) &&
+		isKnownType {
+		fnum, typ, nFnumTyp3, err := decodeFieldNumberAndTyp3(bz)
+		if err != nil {
+			return errors.Wrap(err, "could not decode field number and type")
+		}
+		if fnum != 1 {
+			return fmt.Errorf("expected field number: 1; got: %v", fnum)
+		}
+		typWanted := typeToTyp3(info.Type, FieldOptions{})
+		if typ != typWanted {
+			return fmt.Errorf("expected field type %v for # %v of %v, got %v",
+				typWanted, fnum, info.Type, typ)
+		}
+
+		slide(&bz, &nWrap, nFnumTyp3)
+		bare = typeToTyp3(info.Type, FieldOptions{}) != Typ3ByteLength
+	}
+
 	// Decode contents into rv.
-	n, err := cdc.decodeReflectBinary(bz, info, rv, FieldOptions{BinFieldNum: 1}, true)
+	n, err := cdc.decodeReflectBinary(bz, info, rv, FieldOptions{BinFieldNum: 1}, bare)
 	if err != nil {
-		return fmt.Errorf("unmarshal to %v failed after %d bytes (%v): %X", info.Type, n, err, bz)
+		return fmt.Errorf(
+			"unmarshal to %v failed after %d bytes (%v): %X",
+			info.Type,
+			n+nWrap,
+			err,
+			bz,
+		)
 	}
 	if n != len(bz) {
-		return fmt.Errorf("unmarshal to %v didn't read all bytes. Expected to read %v, only read %v: %X", info.Type, len(bz), n, bz)
+		return fmt.Errorf(
+			"unmarshal to %v didn't read all bytes. Expected to read %v, only read %v: %X",
+			info.Type,
+			len(bz),
+			n+nWrap,
+			bz,
+		)
 	}
+
 	return nil
+}
+
+func isStructOrRepeatedStruct(info *TypeInfo) bool {
+	if info.Type.Kind() == reflect.Struct {
+		return true
+	}
+	isRepeatedStructAr := info.Type.Kind() == reflect.Array && info.Type.Elem().Kind() == reflect.Struct
+	isRepeatedStructSl := info.Type.Kind() == reflect.Slice && info.Type.Elem().Kind() == reflect.Struct
+	return isRepeatedStructAr || isRepeatedStructSl
+}
+
+func isPointerToStructOrToRepeatedStruct(rv reflect.Value, rt reflect.Type) bool {
+	if rv.Kind() == reflect.Struct {
+		return true
+	}
+
+	drv, isPtr, isNil := derefPointers(rv)
+	if isPtr && drv.Kind() == reflect.Struct {
+		return true
+	}
+
+	if isPtr && isNil {
+		rt := derefType(rt)
+		if rt.Kind() == reflect.Struct {
+			return true
+		}
+		return rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.Struct ||
+			rt.Kind() == reflect.Array && rt.Elem().Kind() == reflect.Struct
+	}
+	isRepeatedStructSl := isPtr && drv.Kind() == reflect.Slice && drv.Elem().Kind() == reflect.Struct
+	isRepeatedStructAr := isPtr && drv.Kind() == reflect.Array && drv.Elem().Kind() == reflect.Struct
+	return isRepeatedStructAr || isRepeatedStructSl
+}
+
+func derefType(rt reflect.Type) (drt reflect.Type) {
+	drt = rt
+	for drt.Kind() == reflect.Ptr {
+		drt = drt.Elem()
+	}
+	return
 }
 
 // Panics if error.
@@ -366,14 +491,13 @@ func (cdc *Codec) MarshalJSON(o interface{}) ([]byte, error) {
 	}
 	rt := rv.Type()
 	w := new(bytes.Buffer)
-	info, err := cdc.getTypeInfo_wlock(rt)
+	info, err := cdc.getTypeInfoWlock(rt)
 	if err != nil {
 		return nil, err
 	}
 
 	// Write the disfix wrapper if it is a registered concrete type.
 	if info.Registered {
-		// Part 1:
 		err = writeStr(w, _fmt(`{"type":"%s","value":`, info.Name))
 		if err != nil {
 			return nil, err
@@ -387,10 +511,6 @@ func (cdc *Codec) MarshalJSON(o interface{}) ([]byte, error) {
 
 	// disfix wrapper continued...
 	if info.Registered {
-		// Part 2:
-		if err != nil {
-			return nil, err
-		}
 		err = writeStr(w, `}`)
 		if err != nil {
 			return nil, err
@@ -410,31 +530,31 @@ func (cdc *Codec) MustMarshalJSON(o interface{}) []byte {
 
 func (cdc *Codec) UnmarshalJSON(bz []byte, ptr interface{}) error {
 	if len(bz) == 0 {
-		return errors.New("UnmarshalJSON cannot decode empty bytes")
+		return errors.New("cannot decode empty bytes")
 	}
 
 	rv := reflect.ValueOf(ptr)
 	if rv.Kind() != reflect.Ptr {
-		return errors.New("UnmarshalJSON expects a pointer")
+		return errors.New("expected a pointer")
 	}
 	rv = rv.Elem()
 	rt := rv.Type()
-	info, err := cdc.getTypeInfo_wlock(rt)
+	info, err := cdc.getTypeInfoWlock(rt)
 	if err != nil {
 		return err
 	}
 	// If registered concrete, consume and verify type wrapper.
 	if info.Registered {
 		// Consume type wrapper info.
-		name, bz_, err := decodeInterfaceJSON(bz)
+		name, data, err := decodeInterfaceJSON(bz)
 		if err != nil {
 			return err
 		}
 		// Check name against info.
 		if name != info.Name {
-			return fmt.Errorf("UnmarshalJSON wants to decode a %v but found a %v", info.Name, name)
+			return errors.Errorf("wanted to decode %v but found %v", info.Name, name)
 		}
-		bz = bz_
+		bz = data
 	}
 	return cdc.decodeReflectJSON(bz, info, rv, FieldOptions{})
 }

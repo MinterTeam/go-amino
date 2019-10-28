@@ -142,7 +142,6 @@ func _deepCopy(src, dst reflect.Value) {
 		panic(fmt.Sprintf("unsupported type %v", src.Kind()))
 	}
 
-	return
 }
 
 //----------------------------------------
@@ -184,16 +183,17 @@ func callAminoCopy(src, dst reflect.Value) bool {
 	if src.Type() != dst.Type() {
 		panic("should not happen")
 	}
-	if src.Kind() == reflect.Ptr {
+	switch {
+	case src.Kind() == reflect.Ptr:
 		cpy := reflect.New(src.Type().Elem())
 		dst.Set(cpy)
-	} else if src.CanAddr() {
+	case src.CanAddr():
 		if !dst.CanAddr() {
 			panic("should not happen")
 		}
 		src = src.Addr()
 		dst = dst.Addr()
-	} else {
+	default:
 		return false
 	}
 	if !canAminoCopy(src) {

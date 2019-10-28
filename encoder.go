@@ -42,9 +42,7 @@ func EncodeVarint(w io.Writer, i int64) (err error) {
 }
 
 func VarintSize(i int64) int {
-	var buf [10]byte
-	n := binary.PutVarint(buf[:], i)
-	return n
+	return UvarintSize(uint64((uint64(i) << 1) ^ uint64(i>>63)))
 }
 
 //----------------------------------------
@@ -145,7 +143,7 @@ func EncodeTime(w io.Writer, t time.Time) (err error) {
 			return InvalidTimeErr(fmt.Sprintf("seconds have to be >= %d and < %d, got: %d",
 				minSeconds, maxSeconds, s))
 		}
-		err = encodeFieldNumberAndTyp3(w, 1, Typ3_Varint)
+		err = encodeFieldNumberAndTyp3(w, 1, Typ3Varint)
 		if err != nil {
 			return
 		}
@@ -164,7 +162,7 @@ func EncodeTime(w io.Writer, t time.Time) (err error) {
 			return InvalidTimeErr(fmt.Sprintf("nanoseconds have to be >= 0 and <= %v, got: %d",
 				maxNanos, s))
 		}
-		err = encodeFieldNumberAndTyp3(w, 2, Typ3_Varint)
+		err = encodeFieldNumberAndTyp3(w, 2, Typ3Varint)
 		if err != nil {
 			return
 		}

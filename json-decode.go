@@ -3,10 +3,11 @@ package amino
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"reflect"
+
+	"github.com/pkg/errors"
 
 	"github.com/davecgh/go-spew/spew"
 )
@@ -63,11 +64,11 @@ func (cdc *Codec) decodeReflectJSON(bz []byte, info *TypeInfo, rv reflect.Value,
 		// Amino time strips the timezone, so must end with Z.
 		if len(bz) >= 2 && bz[0] == '"' && bz[len(bz)-1] == '"' {
 			if bz[len(bz)-2] != 'Z' {
-				err = fmt.Errorf("Amino:JSON time must be UTC and end with 'Z' but got %s.", bz)
+				err = errors.Errorf("amino:JSON time must be UTC and end with 'Z' but got %s", bz)
 				return
 			}
 		} else {
-			err = fmt.Errorf("Amino:JSON time must be an RFC3339Nano string, but got %s.", bz)
+			err = errors.Errorf("amino:JSON time must be an RFC3339Nano string, but got %s", bz)
 			return
 		}
 	}
@@ -82,7 +83,7 @@ func (cdc *Codec) decodeReflectJSON(bz []byte, info *TypeInfo, rv reflect.Value,
 	if info.IsAminoUnmarshaler {
 		// First, decode repr instance from bytes.
 		rrv, rinfo := reflect.New(info.AminoUnmarshalReprType).Elem(), (*TypeInfo)(nil)
-		rinfo, err = cdc.getTypeInfo_wlock(info.AminoUnmarshalReprType)
+		rinfo, err = cdc.getTypeInfoWlock(info.AminoUnmarshalReprType)
 		if err != nil {
 			return
 		}
@@ -127,7 +128,10 @@ func (cdc *Codec) decodeReflectJSON(bz []byte, info *TypeInfo, rv reflect.Value,
 		fallthrough
 	case reflect.Uint64, reflect.Uint:
 		if bz[0] != '"' || bz[len(bz)-1] != '"' {
-			err = fmt.Errorf("invalid character -- Amino:JSON int/int64/uint/uint64 expects quoted values for javascript numeric support, got: %v.", string(bz))
+			err = errors.Errorf(
+				"invalid character -- Amino:JSON int/int64/uint/uint64 expects quoted values for javascript numeric support, got: %v", // nolint: lll
+				string(bz),
+			)
 			if err != nil {
 				return
 			}
@@ -143,7 +147,7 @@ func (cdc *Codec) decodeReflectJSON(bz []byte, info *TypeInfo, rv reflect.Value,
 
 	case reflect.Float32, reflect.Float64:
 		if !fopts.Unsafe {
-			return errors.New("Amino:JSON float* support requires `amino:\"unsafe\"`.")
+			return errors.New("amino:JSON float* support requires `amino:\"unsafe\"`")
 		}
 		fallthrough
 	case reflect.Bool, reflect.String:
@@ -164,7 +168,7 @@ func invokeStdlibJSONUnmarshal(bz []byte, rv reflect.Value, fopts FieldOptions) 
 		panic("rv not addressable nor pointer")
 	}
 
-	var rrv reflect.Value = rv
+	rrv := rv
 	if rv.Kind() != reflect.Ptr {
 		rrv = reflect.New(rv.Type())
 	}
@@ -177,7 +181,8 @@ func invokeStdlibJSONUnmarshal(bz []byte, rv reflect.Value, fopts FieldOptions) 
 }
 
 // CONTRACT: rv.CanAddr() is true.
-func (cdc *Codec) decodeReflectJSONInterface(bz []byte, iinfo *TypeInfo, rv reflect.Value, fopts FieldOptions) (err error) {
+func (cdc *Codec) decodeReflectJSONInterface(bz []byte, iinfo *TypeInfo, rv reflect.Value,
+	fopts FieldOptions) (err error) {
 	if !rv.CanAddr() {
 		panic("rv not addressable")
 	}
@@ -216,7 +221,7 @@ func (cdc *Codec) decodeReflectJSONInterface(bz []byte, iinfo *TypeInfo, rv refl
 	// Get concrete type info.
 	// NOTE: Unlike decodeReflectBinaryInterface, uses the full name string.
 	var cinfo *TypeInfo
-	cinfo, err = cdc.getTypeInfoFromName_rlock(name)
+	cinfo, err = cdc.getTypeInfoFromNameRlock(name)
 	if err != nil {
 		return
 	}
@@ -269,7 +274,7 @@ func (cdc *Codec) decodeReflectJSONArray(bz []byte, info *TypeInfo, rv reflect.V
 
 	default: // General case.
 		var einfo *TypeInfo
-		einfo, err = cdc.getTypeInfo_wlock(ert)
+		einfo, err = cdc.getTypeInfoWlock(ert)
 		if err != nil {
 			return
 		}
@@ -322,14 +327,15 @@ func (cdc *Codec) decodeReflectJSONSlice(bz []byte, info *TypeInfo, rv reflect.V
 			// Special case when length is 0.
 			// NOTE: We prefer nil slices.
 			rv.Set(info.ZeroValue)
-		} else {
-			// NOTE: Already set via json.Unmarshal() above.
 		}
+		// else {
+		// NOTE: Already set via json.Unmarshal() above.
+		// }
 		return
 
 	default: // General case.
 		var einfo *TypeInfo
-		einfo, err = cdc.getTypeInfo_wlock(ert)
+		einfo, err = cdc.getTypeInfoWlock(ert)
 		if err != nil {
 			return
 		}
@@ -392,7 +398,7 @@ func (cdc *Codec) decodeReflectJSONStruct(bz []byte, info *TypeInfo, rv reflect.
 		// Get field rv and info.
 		var frv = rv.Field(field.Index)
 		var finfo *TypeInfo
-		finfo, err = cdc.getTypeInfo_wlock(field.Type)
+		finfo, err = cdc.getTypeInfoWlock(field.Type)
 		if err != nil {
 			return
 		}
@@ -408,8 +414,12 @@ func (cdc *Codec) decodeReflectJSONStruct(bz []byte, info *TypeInfo, rv reflect.
 			// but perhaps we are aiming for as much compatibility here.
 			// JAE: I vote we depart from encoding/json, than carry a vuln.
 
-			// Set nil/zero on frv.
-			frv.Set(reflect.Zero(frv.Type()))
+			// Set to the zero value only if not omitempty
+			if !field.JSONOmitEmpty {
+				// Set nil/zero on frv.
+				frv.Set(reflect.Zero(frv.Type()))
+			}
+
 			continue
 		}
 
@@ -450,7 +460,7 @@ func (cdc *Codec) decodeReflectJSONMap(bz []byte, info *TypeInfo, rv reflect.Val
 		return
 	}
 	var vinfo *TypeInfo
-	vinfo, err = cdc.getTypeInfo_wlock(rv.Type().Elem())
+	vinfo, err = cdc.getTypeInfoWlock(rv.Type().Elem())
 	if err != nil {
 		return
 	}
@@ -501,7 +511,7 @@ func decodeInterfaceJSON(bz []byte) (name string, data []byte, err error) {
 
 	// Get name.
 	if dfw.Name == "" {
-		err = errors.New("JSON encoding of interfaces require non-empty type field.")
+		err = errors.New("JSON encoding of interfaces require non-empty type field")
 		return
 	}
 	name = dfw.Name
